@@ -12,6 +12,7 @@ from pydantic_ai.models.gemini import GeminiModel
 import nest_asyncio
 from google import genai
 from google.genai import types
+from voice import get_audio_bytes
 
 # Apply nest_asyncio to handle async operations in Streamlit
 nest_asyncio.apply()
@@ -347,6 +348,14 @@ async def generate_research_summary(research_plan, search_results):
         logger.error(f"Error generating research summary: {e}")
         return "Could not generate a summary of the research findings."
 
+def display_audio_player(text: str):
+    """Display an audio player for the given text"""
+    audio_bytes = get_audio_bytes(text)
+    if audio_bytes:
+        st.audio(audio_bytes, format='audio/mp3')
+    else:
+        st.error("Failed to generate audio")
+
 def display_research_plan_and_results(research_plan, research_results):
     """Display the research plan and results in a structured format."""
     if not research_plan:
@@ -359,6 +368,10 @@ def display_research_plan_and_results(research_plan, research_results):
     # User Intent
     st.subheader("📋 User Intent")
     st.write(research_plan.user_intent)
+    col1, col2 = st.columns([10, 1])
+    with col2:
+        if st.button("🔊", key="intent_audio"):
+            display_audio_player(research_plan.user_intent)
     
     # Key Topics
     st.subheader("🔑 Key Topics to Research")
@@ -374,8 +387,13 @@ def display_research_plan_and_results(research_plan, research_results):
         
         for step in research_plan.research_steps:
             with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
-                st.write("**Description:**")
-                st.write(step.description)
+                col1, col2 = st.columns([10, 1])
+                with col1:
+                    st.write("**Description:**")
+                    st.write(step.description)
+                with col2:
+                    if st.button("🔊", key=f"step_{step.step_number}_audio"):
+                        display_audio_player(step.description)
                 
                 st.write("**Sources Used:**")
                 for source in step.sources:
@@ -388,20 +406,34 @@ def display_research_plan_and_results(research_plan, research_results):
                 if step.step_number in results_by_step:
                     result = results_by_step[step.step_number]
                     st.write("**🔎 Research Findings:**")
-                    st.write(f"*Search Query: {result.search_query}*")
-                    st.markdown(result.results)
+                    col1, col2 = st.columns([10, 1])
+                    with col1:
+                        st.markdown(result.results)
+                    with col2:
+                        if st.button("🔊", key=f"results_{step.step_number}_audio"):
+                            display_audio_player(result.results)
                 else:
                     st.info("No research findings available for this step.")
         
-        # Display summary
+        # Display summary with audio button
         st.subheader("📊 Research Summary")
-        st.write(research_results.summary)
+        col1, col2 = st.columns([10, 1])
+        with col1:
+            st.write(research_results.summary)
+        with col2:
+            if st.button("🔊", key="summary_audio"):
+                display_audio_player(research_results.summary)
     else:
         # If no results yet, show research plan only
         for step in research_plan.research_steps:
             with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
-                st.write("**Description:**")
-                st.write(step.description)
+                col1, col2 = st.columns([10, 1])
+                with col1:
+                    st.write("**Description:**")
+                    st.write(step.description)
+                with col2:
+                    if st.button("🔊", key=f"step_{step.step_number}_audio"):
+                        display_audio_player(step.description)
                 
                 st.write("**Sources to Use:**")
                 for source in step.sources:
@@ -412,9 +444,14 @@ def display_research_plan_and_results(research_plan, research_results):
         
         st.info("Research is currently in progress. Results will appear here once complete.")
     
-    # Final Deliverable
+    # Final Deliverable with audio button
     st.subheader("📑 Final Deliverable")
-    st.write(research_plan.final_deliverable)
+    col1, col2 = st.columns([10, 1])
+    with col1:
+        st.write(research_plan.final_deliverable)
+    with col2:
+        if st.button("🔊", key="deliverable_audio"):
+            display_audio_player(research_plan.final_deliverable)
 
 async def main():
     """Main function for the Streamlit app."""
