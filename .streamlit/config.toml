@@ -1,0 +1,13 @@
+[theme]
+primaryColor="#75c9ff"
+backgroundColor="#fcf9f8"
+secondaryBackgroundColor="#DBF1FF"
+textColor="#111953"
+
+[server]
+runOnSave = true
+maxUploadSize = 2000
+
+[client]
+showSidebarNavigation = false
+
