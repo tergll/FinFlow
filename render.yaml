@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: FinFlow.ai
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    branch: main
+    buildCommand: ""
+    startCommand: ""

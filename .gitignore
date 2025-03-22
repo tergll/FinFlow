@@ -1,3 +1,6 @@
 FinFlow\.streamlit\secrets.toml
 secrets.toml
 *secrets.toml
+.venv 
+.env      
+./** */
