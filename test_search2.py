@@ -111,6 +111,14 @@ class ResearchPlannerParams(BaseModel):
     """Parameters for the research planner"""
     query: str = Field(..., description="The user's research query")
 
+class SearchResult(BaseModel):
+    """Results from a search operation"""
+    step_number: int = Field(..., description="The step number this search is for")
+    step_name: str = Field(..., description="The name of the step")
+    search_query: str = Field(..., description="The query used for searching")
+    results: str = Field(..., description="The search results")
+    timestamp: str = Field(..., description="When the search was conducted")
+
 #########################
 # Research Planner Agent
 #########################
@@ -141,6 +149,68 @@ Consider what a new analyst would need to know to conduct this research effectiv
 """
 )
 
+#########################
+# Research Execution Agent
+#########################
+
+class ResearchExecutionParams(BaseModel):
+    """Parameters for executing research"""
+    plan: ResearchPlan = Field(..., description="The research plan to execute")
+    selected_sources: Dict[str, bool] = Field(..., description="Selected sources to use")
+
+class ResearchExecutionResult(BaseModel):
+    """Results from executing research"""
+    search_results: List[SearchResult] = Field(..., description="List of search results for each step")
+    summary: str = Field(..., description="Summary of the research findings")
+
+research_execution_agent = Agent(
+    model=gemini_model,
+    deps_type=ResearchExecutionParams,
+    result_type=ResearchExecutionResult,
+    system_prompt="""You are an expert research executor who follows research plans to gather information.
+
+Your task is to:
+
+1. Analyze the provided research plan
+2. For each step in the plan, generate appropriate search queries based on the step description
+3. Execute searches using the specified sources
+4. Compile and organize the search results
+5. Provide a summary of the overall findings
+
+Focus on being thorough and accurate while following the research plan closely.
+"""
+)
+
+#########################
+# Research Summary Agent
+#########################
+
+class ResearchSummaryParams(BaseModel):
+    """Parameters for generating a research summary"""
+    research_plan: ResearchPlan = Field(..., description="The research plan that was executed")
+    search_results: List[SearchResult] = Field(..., description="The search results obtained during research")
+
+class ResearchSummaryResult(BaseModel):
+    """Result of the research summary generation"""
+    summary: str = Field(..., description="A comprehensive summary of the research findings")
+
+research_summary_agent = Agent(
+    model=gemini_model,
+    deps_type=ResearchSummaryParams,
+    result_type=ResearchSummaryResult,
+    system_prompt="""You are an expert research analyst who creates concise yet comprehensive summaries of research findings.
+
+Your task is to:
+
+1. Analyze the provided research plan and search results
+2. Evaluate how well the findings address the research objectives and key topics
+3. Identify any gaps that may need further investigation
+4. Create a well-structured summary that highlights the most important insights
+
+Focus on being objective and analytical while providing a clear overview of what was discovered.
+"""
+)
+
 # Streamlit UI Functions
 
 def initialize_session_state():
@@ -149,12 +219,18 @@ def initialize_session_state():
         st.session_state["messages"] = []
     if "research_plan" not in st.session_state:
         st.session_state["research_plan"] = None
+    if "research_results" not in st.session_state:
+        st.session_state["research_results"] = None
     if "trigger_research" not in st.session_state:
         st.session_state["trigger_research"] = False
-    
-    # Initialize search-related state variables
-    if "search_results" not in st.session_state:
-        st.session_state["search_results"] = {}
+    if "selected_sources" not in st.session_state:
+        st.session_state["selected_sources"] = {
+            "Web Search": True,
+            "YouTube": True,
+            "Google News": True,
+            "Yahoo Finance": True,
+            "Documents on Hand": True
+        }
 
 def display_chat_messages():
     """Display chat message history."""
@@ -177,17 +253,12 @@ def setup_sidebar():
     """Setup the sidebar with research sources and options."""
     st.write("Available sources for gathering information:")
     
-    sources = {
-        "Web Search": True,
-        "YouTube": True,
-        "Google News": True,
-        "Yahoo Finance": True,
-        "Documents on Hand": True
-    }
-    
-    # Create toggles for each source
-    for source, default in sources.items():
+    sources = {}
+    for source, default in st.session_state["selected_sources"].items():
         sources[source] = st.checkbox(source, value=default)
+    
+    # Update session state with selected sources
+    st.session_state["selected_sources"] = sources
     
     # Source descriptions
     with st.expander("Source Information"):
@@ -212,12 +283,77 @@ async def generate_research_plan(query):
         logger.error(f"Error generating research plan: {e}")
         return None
 
-def display_research_plan(research_plan):
-    """Display the research plan in a structured format with search buttons."""
+async def execute_research(research_plan, selected_sources):
+    """Execute research based on the plan and selected sources."""
+    search_results = []
+    for step in research_plan.research_steps:
+        # Only process steps that use sources that are selected
+        step_sources = [s.lower() for s in step.sources]
+        
+        should_search = False
+        search_type = ""
+        
+        # Determine if this step should use search and what type
+        if any(s in ["google", "web search", "search"] for s in step_sources) and selected_sources.get("Web Search", False):
+            should_search = True
+            search_type = "Web Search"
+        elif "youtube" in step_sources and selected_sources.get("YouTube", False):
+            should_search = True
+            search_type = "YouTube"
+        elif any(s in ["news", "google news"] for s in step_sources) and selected_sources.get("Google News", False):
+            should_search = True
+            search_type = "Google News"
+        elif any(s in ["finance", "yahoo finance"] for s in step_sources) and selected_sources.get("Yahoo Finance", False):
+            should_search = True
+            search_type = "Yahoo Finance"
+        
+        if should_search:
+            # Generate a search query based on the step
+            search_query = f"{search_type}: {step.step_name} - {step.description}"
+            
+            # Execute the search
+            results = await execute_google_search(search_query)
+            
+            # Store the results
+            search_results.append(SearchResult(
+                step_number=step.step_number,
+                step_name=step.step_name,
+                search_query=search_query,
+                results=results,
+                timestamp=datetime.now().isoformat()
+            ))
+    
+    # Generate a summary of all findings
+    summary = await generate_research_summary(research_plan, search_results)
+    
+    return ResearchExecutionResult(
+        search_results=search_results,
+        summary=summary
+    )
+
+async def generate_research_summary(research_plan, search_results):
+    """Generate a summary of the research findings using the research summary agent."""
+    try:
+        # Create a summary of the research findings using the agent
+        summary_params = ResearchSummaryParams(
+            research_plan=research_plan,
+            search_results=search_results
+        )
+        
+        result = await research_summary_agent.run(summary_params)
+        
+        return result.summary
+    except Exception as e:
+        logger.error(f"Error generating research summary: {e}")
+        return "Could not generate a summary of the research findings."
+
+def display_research_plan_and_results(research_plan, research_results):
+    """Display the research plan and results in a structured format."""
     if not research_plan:
         st.error("Failed to generate a research plan.")
         return
     
+    # Display research plan
     st.header("Research Analysis & Plan")
     
     # User Intent
@@ -229,52 +365,55 @@ def display_research_plan(research_plan):
     for i, topic in enumerate(research_plan.key_topics, 1):
         st.write(f"{i}. {topic}")
     
-    # Research Steps
-    st.subheader("🔍 Step-by-Step Research Plan")
+    # Research Steps with Results
+    st.subheader("🔍 Research Steps & Findings")
     
-    for step in research_plan.research_steps:
-        with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
-            st.write("**Description:**")
-            st.write(step.description)
-            
-            st.write("**Sources to Use:**")
-            for source in step.sources:
-                st.write(f"- {source}")
+    if research_results and research_results.search_results:
+        # Create a dictionary to easily access results by step number
+        results_by_step = {r.step_number: r for r in research_results.search_results}
+        
+        for step in research_plan.research_steps:
+            with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
+                st.write("**Description:**")
+                st.write(step.description)
                 
-            st.write("**Expected Outcome:**")
-            st.write(step.expected_outcome)
-            
-            # Add search buttons for this step
-            if any(s.lower() in [src.lower() for src in step.sources] for s in ["google", "web search", "search"]):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    search_query = st.text_input(
-                        "Search query:",
-                        value=f"{step.step_name}: {step.description}",
-                        key=f"query_{step.step_number}"
-                    )
-                with col2:
-                    if st.button("Search", key=f"search_btn_{step.step_number}"):
-                        with st.spinner("Searching..."):
-                            results = safe_async_run(execute_google_search(search_query))
-                            st.session_state[f"search_results_{step.step_number}"] = results
-    
-    # Display search results section
-    st.subheader("🔎 Research Results")
-    
-    has_results = False
-    for step in research_plan.research_steps:
-        result_key = f"search_results_{step.step_number}"
-        if result_key in st.session_state and st.session_state[result_key]:
-            has_results = True
-            with st.expander(f"Search Results for Step {step.step_number}: {step.step_name}", expanded=True):
-                st.markdown(st.session_state[result_key])
-    
-    if not has_results:
-        st.info("No research has been conducted yet. Click the search buttons in the research plan steps to gather information.")
+                st.write("**Sources Used:**")
+                for source in step.sources:
+                    st.write(f"- {source}")
+                
+                st.write("**Expected Outcome:**")
+                st.write(step.expected_outcome)
+                
+                # Display search results if available for this step
+                if step.step_number in results_by_step:
+                    result = results_by_step[step.step_number]
+                    st.write("**🔎 Research Findings:**")
+                    st.write(f"*Search Query: {result.search_query}*")
+                    st.markdown(result.results)
+                else:
+                    st.info("No research findings available for this step.")
+        
+        # Display summary
+        st.subheader("📊 Research Summary")
+        st.write(research_results.summary)
+    else:
+        # If no results yet, show research plan only
+        for step in research_plan.research_steps:
+            with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
+                st.write("**Description:**")
+                st.write(step.description)
+                
+                st.write("**Sources to Use:**")
+                for source in step.sources:
+                    st.write(f"- {source}")
+                
+                st.write("**Expected Outcome:**")
+                st.write(step.expected_outcome)
+        
+        st.info("Research is currently in progress. Results will appear here once complete.")
     
     # Final Deliverable
-    st.subheader("📊 Final Deliverable")
+    st.subheader("📑 Final Deliverable")
     st.write(research_plan.final_deliverable)
 
 async def main():
@@ -288,36 +427,51 @@ async def main():
         
         # Setup research sources
         st.subheader("Research Sources")
-        sources = setup_sidebar()
+        selected_sources = setup_sidebar()
         
         # Display chat interface
         st.subheader("Chat Interface")
         display_chat_messages()
+        
+        # Input field for new queries
         prompt = handle_user_input()
     
-    # Process research if triggered
+    # Main content area
     if st.session_state["trigger_research"]:
         st.session_state["trigger_research"] = False
         
-        with st.status("Analyzing query and creating research plan...") as status:
+        # Process the research query
+        with st.status("Processing your research query...", expanded=True) as status:
+            # Step 1: Generate research plan
+            status.update(label="Generating research plan...")
             query = st.session_state.messages[-1]["content"]
-            
-            # Generate research plan
             research_plan = await generate_research_plan(query)
             st.session_state["research_plan"] = research_plan
             
-            status.update(label="Research plan generated!", state="complete")
-            
-            # Add response to chat history
-            response = "I've analyzed your research query and created a detailed plan to help you gather the information you need."
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            with st.sidebar:
-                with st.chat_message("assistant"):
-                    st.markdown(response)
+            # Step 2: Execute research automatically
+            if research_plan:
+                status.update(label="Executing research automatically...")
+                research_results = await execute_research(research_plan, st.session_state["selected_sources"])
+                st.session_state["research_results"] = research_results
+                
+                # Add response to chat history
+                response = "I've analyzed your query, created a research plan, and automatically conducted the research. You can see the complete findings below."
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                
+                with st.sidebar:
+                    with st.chat_message("assistant"):
+                        st.markdown(response)
+                
+                status.update(label="Research completed!", state="complete")
+            else:
+                status.update(label="Failed to generate research plan", state="error")
     
-    # Display the research plan
+    # Display the research plan and results
     if st.session_state.get("research_plan"):
-        display_research_plan(st.session_state["research_plan"])
+        display_research_plan_and_results(
+            st.session_state["research_plan"],
+            st.session_state.get("research_results")
+        )
 
 if __name__ == "__main__":
     safe_async_run(main())
