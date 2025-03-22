@@ -1,0 +1,5 @@
+apify-client
+python-dotenv
+scikit-learn
+numpy
+google-generativeai
