@@ -14,7 +14,7 @@ load_dotenv()
 
 def check_api_key() -> bool:
     """Check if the ElevenLabs API key exists in the environment variables"""
-    api_key = st.secrets("ELEVEN_LABS_API_KEY")
+    api_key = st.secrets["ELEVEN_LABS_API_KEY"]
     if not api_key:
         st.error("Error: ELEVEN_LABS_API_KEY not found in .env file")
         return False
@@ -26,7 +26,7 @@ def text_to_speech(text: str, max_retries: int = 3) -> Optional[bytes]:
         return None
         
     client = ElevenLabs(
-        api_key=st.secrets("ELEVEN_LABS_API_KEY"),
+        api_key=st.secrets["ELEVEN_LABS_API_KEY"],
     )
     
     for attempt in range(max_retries):
@@ -37,7 +37,28 @@ def text_to_speech(text: str, max_retries: int = 3) -> Optional[bytes]:
                 model_id="eleven_multilingual_v2",
                 output_format="mp3_44100_128",
             )
-            return audio
+            
+            # Handle different return types
+            if hasattr(audio, '__iter__') and not isinstance(audio, (bytes, str)):
+                try:
+                    # It's a generator or iterable, collect all chunks
+                    audio_bytes = b''
+                    for chunk in audio:
+                        if isinstance(chunk, bytes):
+                            audio_bytes += chunk
+                    return audio_bytes
+                except Exception as e:
+                    st.error(f"Error processing audio chunks: {str(e)}")
+                    return None
+            elif hasattr(audio, 'read'):
+                # It's a file-like object
+                return audio.read()
+            elif isinstance(audio, bytes):
+                # It's already bytes
+                return audio
+            else:
+                st.error(f"Unexpected audio data type: {type(audio)}")
+                return None
         except ApiError as e:
             st.error(f"API Error: {str(e)}")
             return None
@@ -72,17 +93,23 @@ def main():
     
     voice = st.selectbox("Select voice:", options=list(voice_options.keys()))
     
+    # Debug section (can be removed in production)
+    with st.expander("Debug Information"):
+        st.write("API Key Status:", "Available" if check_api_key() else "Not Available")
+    
     # Generate button
     if st.button("Generate Audio"):
         if not text_input:
             st.warning("Please enter some text.")
         else:
             with st.spinner("Generating audio..."):
+                st.info("Sending request to ElevenLabs API...")
                 audio_data = text_to_speech(text_input)
                 
                 if audio_data:
+                    st.success(f"Audio generated successfully! Size: {len(audio_data)} bytes")
                     # Display audio player
-                    st.audio(audio_data, format="audio/mp3")
+                    st.audio(io.BytesIO(audio_data), format="audio/mp3")
                     
                     # Add download button
                     st.download_button(

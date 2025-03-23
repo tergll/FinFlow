@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import hashlib
+import io
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Union
 
@@ -16,6 +17,10 @@ from google.genai import types
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import httpx
+from elevenlabs.client import ElevenLabs
+from elevenlabs import play
+from elevenlabs.core.api_error import ApiError
 
 # Third-party client imports - conditionally import
 try:
@@ -34,6 +39,7 @@ logger = logging.getLogger(__name__)
 # Initialize API credentials
 GEMINI_API_KEY = st.secrets.get("GOOGLE_AI_STUDIO", "")
 APIFY_API_KEY = st.secrets.get("APIFY_API_KEY", "")
+ELEVEN_LABS_API_KEY = st.secrets.get("ELEVEN_LABS_API_KEY", "")
 
 os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 
@@ -57,6 +63,67 @@ def safe_async_run(coroutine):
         else:
             raise
 
+#########################
+# ElevenLabs Integration
+#########################
+
+def check_elevenlabs_api_key() -> bool:
+    """Check if the ElevenLabs API key exists in the environment variables"""
+    api_key = st.secrets.get("ELEVEN_LABS_API_KEY", "")
+    if not api_key:
+        st.error("Error: ELEVEN_LABS_API_KEY not found in secrets")
+        return False
+    return True
+
+def text_to_speech(text: str, voice_id: str = "JBFqnCBsd6RMkjVDRZzb", max_retries: int = 3) -> Optional[bytes]:
+    """Convert text to speech using ElevenLabs API"""
+    if not check_elevenlabs_api_key():
+        return None
+        
+    client = ElevenLabs(
+        api_key=ELEVEN_LABS_API_KEY,
+    )
+    
+    for attempt in range(max_retries):
+        try:
+            audio = client.text_to_speech.convert(
+                text=text,
+                voice_id=voice_id,
+                model_id="eleven_multilingual_v2",
+                output_format="mp3_44100_128",
+            )
+            
+            # Handle different return types
+            if hasattr(audio, '__iter__') and not isinstance(audio, (bytes, str)):
+                try:
+                    # It's a generator or iterable, collect all chunks
+                    audio_bytes = b''
+                    for chunk in audio:
+                        if isinstance(chunk, bytes):
+                            audio_bytes += chunk
+                    return audio_bytes
+                except Exception as e:
+                    st.error(f"Error processing audio chunks: {str(e)}")
+                    return None
+            elif hasattr(audio, 'read'):
+                # It's a file-like object
+                return audio.read()
+            elif isinstance(audio, bytes):
+                # It's already bytes
+                return audio
+            else:
+                st.error(f"Unexpected audio data type: {type(audio)}")
+                return None
+        except ApiError as e:
+            st.error(f"API Error: {str(e)}")
+            return None
+        except httpx.RemoteProtocolError as e:
+            if attempt == max_retries - 1:
+                st.error(f"Failed after {max_retries} attempts: {str(e)}")
+                return None
+            time.sleep(2)
+    
+    return None
 #########################
 # YouTube Search Functions
 #########################
@@ -327,6 +394,63 @@ When including YouTube analysis results, present them in a narrative style with 
 """
 )
 
+
+#########################
+# Direct YouTube Analysis Function
+#########################
+
+async def analyze_youtube_url(youtube_url, query=""):
+    """Analyze a single YouTube URL using Gemini."""
+    try:
+        # Initialize the Gemini client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        model = "gemini-2.0-flash"
+        
+        prompt = """Analyze this YouTube video and provide:
+        1. Title
+        2. Summary of the content
+        3. Key findings with timestamps [MM:SS]
+        4. Transcript excerpts with timestamps [MM:SS] of the most relevant sections
+        
+        Format the output like an interview transcript with clear timestamps for each section."""
+        
+        if query:
+            prompt += f"\n\nFocus your analysis on topics related to: {query}"
+        
+        # Set up the content with the YouTube URL and query
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_uri(
+                        file_uri=youtube_url,
+                        mime_type="video/*",
+                    ),
+                    types.Part.from_text(text=prompt),
+                ],
+            ),
+        ]
+        
+        generate_content_config = types.GenerateContentConfig(
+            temperature=1,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+            response_mime_type="text/plain",
+        )
+        
+        # Execute the analysis
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=generate_content_config,
+        )
+        
+        return response.text
+    except Exception as e:
+        logger.error(f"Error analyzing YouTube URL: {str(e)}")
+        return f"Error analyzing YouTube URL: {str(e)}"
+
 #########################
 # Narrative Synthesis Agent
 #########################
@@ -486,18 +610,18 @@ def display_speech_script(script):
             st.write(script["message"])
         return
     
-    # Display speech title
-    st.header(f"📢 {script.title}")
-    
-    # Display delivery notes
-    with st.expander("Delivery Notes", expanded=False):
-        for note in script.delivery_notes:
-            st.write(f"• {note}")
-    
     # Create tabs for different views
-    tab1, tab2 = st.tabs(["Full Script", "Script Sections"])
+    tab1, tab2, tab3 = st.tabs(["Full Script", "Script Sections", "Audio"])
     
     with tab1:
+        # Display speech title
+        st.header(f"📢 {script.title}")
+        
+        # Display delivery notes
+        with st.expander("Delivery Notes", expanded=False):
+            for note in script.delivery_notes:
+                st.write(f"• {note}")
+                
         # Format the full script with proper markdown
         formatted_script = script.full_script
         
@@ -521,14 +645,90 @@ def display_speech_script(script):
         # Body sections
         st.subheader("Main Content")
         for i, section in enumerate(script.body_sections, 1):
-            with st.expander(f"Section {i}", expanded=i==1):
+            # with st.expander(f"Section {i}", expanded=i==1):
+            with st.container(border=True):
+                st.write(f"**Section {i}:**")
                 st.markdown(section)
         
         # Conclusion
         st.subheader("Conclusion")
         st.markdown(script.conclusion)
     
-    # Add download button for the script
+    with tab3:
+        st.header(f"📢 Audio Generation for: {script.title}")
+        
+        # Voice selection dropdown
+        voice_options = {
+            "Rachel (Female)": "JBFqnCBsd6RMkjVDRZzb",
+            "Adam (Male)": "pNInz6obpgDQGcFmaJgB",
+            "Antoni (Male)": "ErXwobaYiN019PkySvjV",
+            "Bella (Female)": "EXAVITQu4vr4xnSDxMaL",
+            "Elli (Female)": "MF3mGyEYCl7XYWbV9V6O"
+        }
+        
+        selected_voice = st.selectbox("Select Voice:", options=list(voice_options.keys()))
+        
+        # Show API key status
+        api_status = check_elevenlabs_api_key()
+        st.write("API Key Status:", "Available ✅" if api_status else "Not Available ❌")
+        if not api_status:
+            st.warning("Please add your ElevenLabs API key to secrets to use voice generation.")
+        
+        # Section selection
+        section_options = ["Full Speech", "Introduction Only", "Conclusion Only"]
+        section_options.extend([f"Section {i+1}" for i in range(len(script.body_sections))])
+        
+        selected_section = st.selectbox("Choose section to generate:", options=section_options)
+        
+        # Determine text based on selection
+        text_to_convert = ""
+        if selected_section == "Full Speech":
+            # Clean the script of formatting markers for speech generation
+            clean_script = re.sub(r'\[\d+:\d+\]|\{[^}]+\}|\[[A-Z\s]+\]', '', script.full_script)
+            text_to_convert = clean_script
+        elif selected_section == "Introduction Only":
+            clean_intro = re.sub(r'\[\d+:\d+\]|\{[^}]+\}|\[[A-Z\s]+\]', '', script.introduction)
+            text_to_convert = clean_intro
+        elif selected_section == "Conclusion Only":
+            clean_conclusion = re.sub(r'\[\d+:\d+\]|\{[^}]+\}|\[[A-Z\s]+\]', '', script.conclusion)
+            text_to_convert = clean_conclusion
+        else:
+            section_index = int(selected_section.split(" ")[1]) - 1
+            if 0 <= section_index < len(script.body_sections):
+                clean_section = re.sub(r'\[\d+:\d+\]|\{[^}]+\}|\[[A-Z\s]+\]', '', script.body_sections[section_index])
+                text_to_convert = clean_section
+        
+        # Preview selected text
+        with st.expander("Preview text to be converted", expanded=False):
+            st.write(text_to_convert)
+        
+        # Generate audio button
+        if st.button("Generate Audio"):
+            if not text_to_convert:
+                st.warning("No text selected for conversion.")
+            else:
+                with st.spinner("Generating audio..."):
+                    voice_id = voice_options[selected_voice]
+                    audio_data = text_to_speech(text_to_convert, voice_id=voice_id)
+                    
+                    if audio_data:
+                        st.success(f"Audio generated successfully! Size: {len(audio_data)/1024:.1f} KB")
+                        
+                        # Display audio player
+                        st.audio(io.BytesIO(audio_data), format="audio/mp3")
+                        
+                        # Add download button
+                        filename = f"{script.title.replace(' ', '_')}_{selected_section.replace(' ', '_')}.mp3"
+                        st.download_button(
+                            label="Download Audio",
+                            data=audio_data,
+                            file_name=filename,
+                            mime="audio/mp3"
+                        )
+                    else:
+                        st.error("Failed to generate audio. Please check your API key and try again.")
+    
+    # Add download button for the script text
     script_text = f"# {script.title}\n\n"
     script_text += "## Delivery Notes\n"
     for note in script.delivery_notes:
@@ -542,489 +742,6 @@ def display_speech_script(script):
         file_name="speech_script.md",
         mime="text/markdown",
     )
-
-#########################
-# Research Tools
-#########################
-
-@research_assistant.tool
-async def web_search(ctx: RunContext[ResearchDeps], query: str) -> List[Dict[str, Any]]:
-    """
-    Search the web for general information.
-    
-    Args:
-        ctx: The context containing dependencies
-        query: The search query
-        
-    Returns:
-        A list of web search results
-    """
-    logger.info(f"Executing web search for: {query}")
-    
-    # Check if web search is enabled
-    if not ctx.deps.available_sources.get("Web Search", False):
-        return [{"title": "Web Search Disabled", "content": "Web search is currently disabled."}]
-    
-    try:
-        # Initialize the Gemini client for Google search
-        client = genai.Client(api_key=ctx.deps.gemini_api_key)
-        model = "gemini-2.0-flash"
-        
-        # Set up the query with the Google Search tool
-        contents = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=query)],
-            ),
-        ]
-        
-        tools = [types.Tool(google_search=types.GoogleSearch())]
-        
-        generate_content_config = types.GenerateContentConfig(
-            temperature=1,
-            top_p=0.95,
-            top_k=40,
-            max_output_tokens=8192,
-            tools=tools,
-            response_mime_type="text/plain",
-        )
-        
-        # Execute the search
-        result_text = ""
-        for chunk in client.models.generate_content_stream(
-            model=model,
-            contents=contents,
-            config=generate_content_config,
-        ):
-            result_text += chunk.text
-        
-        # Create results list
-        results = []
-        
-        # Split the text into sections (simplified parsing)
-        sections = result_text.split("\n\n")
-        for i, section in enumerate(sections[:5]):  # Limit to 5 results
-            lines = section.strip().split("\n")
-            if len(lines) >= 2:
-                title = lines[0]
-                content = "\n".join(lines[1:])
-                url = "https://example.com"  # Placeholder URL
-                
-                # Extract actual URL if present
-                for line in lines:
-                    if line.startswith("http"):
-                        url = line
-                        break
-                
-                results.append({
-                    "title": title,
-                    "content": content,
-                    "url": url
-                })
-        
-        # Fallback if parsing failed
-        if not results:
-            results.append({
-                "title": f"Search Results for: {query}",
-                "content": result_text,
-                "url": "https://example.com/search"
-            })
-        
-        return results
-        
-    except Exception as e:
-        logger.error(f"Error in web search: {str(e)}")
-        return [{"title": "Search Error", "content": f"An error occurred: {str(e)}"}]
-
-@research_assistant.tool
-async def youtube_search(ctx: RunContext[ResearchDeps], query: str) -> Dict[str, Any]:
-    """
-    Search for recent YouTube videos related to the query.
-    
-    Args:
-        ctx: The context containing dependencies
-        query: The search query
-        
-    Returns:
-        A list of YouTube video results
-    """
-    logger.info(f"Executing YouTube search for: {query}")
-    
-    # Check if YouTube search is enabled
-    if not ctx.deps.available_sources.get("YouTube", False):
-        return {
-            "success": False,
-            "error": "YouTube search is currently disabled.",
-            "videos": []
-        }
-    
-    if not APIFY_AVAILABLE or not APIFY_API_KEY:
-        # Fallback to web search if Apify is not available
-        try:
-            web_results = await web_search(ctx, f"YouTube {query} recent videos")
-            youtube_results = []
-            
-            for result in web_results:
-                if "youtube.com" in result.get("url", "").lower():
-                    youtube_results.append({
-                        "title": result["title"],
-                        "url": result["url"],
-                        "description": result["content"],
-                        "channel": "",
-                        "publishedAt": "",
-                        "views": 0,
-                        "duration": "",
-                        "likes": 0
-                    })
-            
-            return {
-                "success": True,
-                "videos": youtube_results
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Error in YouTube search fallback: {str(e)}",
-                "videos": []
-            }
-    
-    # Use Apify YouTube search
-    try:
-        # Modified to be more robust based on the provided script
-        client = ApifyClient(APIFY_API_KEY)
-        
-        # Calculate date 2 days ago
-        two_days_ago = (datetime.utcnow() - timedelta(days=2)).strftime('%Y-%m-%d')
-        
-        # Prepare the Actor input
-        run_input = {
-            "searchQueries": [query],
-            "maxResults": 50,  # Increased to get more results for filtering
-            "maxResultsShorts": 0,
-            "maxResultStreams": 0,
-            "postsFromDate": two_days_ago
-        }
-        
-        logger.info(f"Starting YouTube search via Apify for: {query}")
-        
-        # Run the Actor and wait for it to finish
-        run = client.actor("streamers/youtube-scraper").call(run_input=run_input)
-        
-        # Fetch results
-        videos = []
-        for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-            if 'title' not in item or 'url' not in item:
-                continue
-                
-            video = {
-                'title': item.get('title', ''),
-                'url': item.get('url', ''),
-                'channel': item.get('channelName', ''),
-                'description': item.get('description', ''),
-                'publishedAt': item.get('uploadDate', ''),
-                'views': item.get('viewCount', 0),
-                'duration': item.get('duration', ''),
-                'likes': item.get('likeCount', 0)
-            }
-            videos.append(video)
-        
-        # Log the number of videos found before filtering
-        logger.info(f"Found {len(videos)} videos from YouTube search before filtering")
-        
-        # Filter by relevance
-        if videos:
-            filtered_videos = filter_by_relevance(videos, query, min(5, len(videos)))
-            
-            # Store the URLs in the context for later use
-            if not ctx.deps.youtube_urls:
-                ctx.deps.youtube_urls = []
-            
-            for video in filtered_videos:
-                if video['url'] not in ctx.deps.youtube_urls:
-                    ctx.deps.youtube_urls.append(video['url'])
-            
-            # Log the actual video URLs being returned
-            logger.info(f"Selected relevant YouTube videos: {ctx.deps.youtube_urls}")
-            
-            return {
-                "success": True,
-                "videos": filtered_videos
-            }
-        else:
-            return {
-                "success": True,
-                "videos": [],
-                "message": "No videos found matching your query."
-            }
-    
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"An error occurred during YouTube search: {error_msg}")
-        return {
-            "success": False,
-            "error": f"An error occurred during YouTube search: {error_msg}",
-            "videos": []
-        }
-
-@research_assistant.tool
-async def youtube_analysis(ctx: RunContext[ResearchDeps], query: str) -> Dict[str, Any]:
-    """
-    Analyze YouTube videos related to the query.
-    
-    Args:
-        ctx: The context containing dependencies
-        query: The research query to relate to YouTube content
-        
-    Returns:
-        Analysis of relevant YouTube videos
-    """
-    logger.info(f"Executing YouTube analysis for: {query}")
-    
-    # Check if YouTube is enabled
-    if not ctx.deps.available_sources.get("YouTube", False):
-        return {"error": "YouTube analysis is currently disabled."}
-    
-    # Check if YouTube URLs are provided
-    if not ctx.deps.youtube_urls or len(ctx.deps.youtube_urls) == 0:
-        # Search for YouTube videos if none are provided
-        logger.info("No YouTube URLs provided, executing YouTube search...")
-        search_results = await youtube_search(ctx, query)
-        
-        # If no videos found, return message
-        if not search_results.get("success", False) or not search_results.get("videos", []):
-            return {
-                "message": "No YouTube URLs provided and no videos found in search.",
-                "video_analyses": []
-            }
-        
-        # At this point, ctx.deps.youtube_urls should be populated from the youtube_search function
-        # But we'll double-check and use the search results as a fallback
-        if not ctx.deps.youtube_urls:
-            video_urls = [video.get("url") for video in search_results.get("videos", [])[:2]]
-            ctx.deps.youtube_urls = video_urls
-            logger.info(f"Using video URLs from search results: {video_urls}")
-    
-    logger.info(f"Analyzing YouTube URLs: {ctx.deps.youtube_urls}")
-    
-    try:
-        # Initialize the Gemini client for video analysis
-        client = genai.Client(api_key=ctx.deps.gemini_api_key)
-        model = "gemini-2.0-flash"
-        
-        video_analyses = []
-        
-        for video_url in ctx.deps.youtube_urls:
-            logger.info(f"Analyzing video URL: {video_url}")
-            
-            # Set up the query for video analysis with a more structured prompt
-            contents = [
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_uri(
-                            file_uri=video_url,
-                            mime_type="video/*",
-                        ),
-                        types.Part.from_text(text=f"""Analyze this video related to: {query}. 
-                        
-Provide the following information in a structured format:
-1. Title: The title of the video
-2. Summary: A concise summary of the video content (2-3 paragraphs)
-3. Key Findings: List 4-6 important findings from the video with timestamps in [MM:SS] format
-4. Transcript Excerpts: Include 3-5 important quotes or statements from the video with timestamps in [MM:SS] format
-                        
-Format the key findings and transcript excerpts as a structured list, making sure each item has a timestamp."""),
-                    ],
-                ),
-            ]
-            
-            generate_content_config = types.GenerateContentConfig(
-                temperature=0.7,  # Slightly reduced for more factual responses
-                top_p=0.95,
-                top_k=40,
-                max_output_tokens=8192,
-                response_mime_type="text/plain",
-            )
-            
-            # Execute the video analysis
-            result_text = ""
-            try:
-                for chunk in client.models.generate_content_stream(
-                    model=model,
-                    contents=contents,
-                    config=generate_content_config,
-                ):
-                    result_text += chunk.text
-                
-                logger.info(f"Analysis complete for video URL: {video_url}")
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"Error in video analysis streaming for {video_url}: {error_msg}")
-                result_text = f"Error analyzing video: {error_msg}"
-            
-            # Parse the result into structured format using a more robust approach
-            analysis = parse_video_analysis(result_text, video_url)
-            video_analyses.append(analysis)
-        
-        return {"video_analyses": video_analyses}
-        
-    except Exception as e:
-        logger.error(f"Error in YouTube analysis: {str(e)}")
-        return {"error": f"An error occurred during YouTube analysis: {str(e)}"}
-
-def parse_video_analysis(result_text, video_url):
-    """
-    Parse video analysis text into a structured format.
-    Uses a more robust approach to extract sections.
-    """
-    # Default structure
-    analysis = {
-        "title": "Unknown Title",
-        "summary": "",
-        "key_findings": [],
-        "transcript_excerpts": [],
-        "video_url": video_url
-    }
-    
-    # Split by main sections
-    sections = {}
-    current_section = None
-    
-    lines = result_text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-            
-        # Check for section headers
-        lower_line = line.lower()
-        if "title:" in lower_line and (current_section is None or current_section != "title"):
-            current_section = "title"
-            sections["title"] = line.replace("Title:", "").strip()
-        elif "summary:" in lower_line and (current_section != "summary"):
-            current_section = "summary"
-            sections["summary"] = []
-        elif ("key findings:" in lower_line or "findings:" in lower_line) and (current_section != "key_findings"):
-            current_section = "key_findings"
-            sections["key_findings"] = []
-        elif ("transcript excerpts:" in lower_line or "excerpts:" in lower_line) and (current_section != "transcript"):
-            current_section = "transcript"
-            sections["transcript"] = []
-        elif current_section:
-            # Skip section headers
-            if any(header in lower_line for header in ["title:", "summary:", "key findings:", "findings:", "transcript excerpts:", "excerpts:"]):
-                continue
-                
-            # Add content to current section
-            if current_section == "title":
-                sections["title"] += " " + line
-            elif current_section in sections:
-                sections[current_section].append(line)
-    
-    # Process the collected sections
-    if "title" in sections:
-        analysis["title"] = sections["title"]
-    
-    if "summary" in sections:
-        analysis["summary"] = " ".join(sections["summary"])
-    
-    # Process key findings
-    if "key_findings" in sections:
-        for line in sections["key_findings"]:
-            # Look for timestamps in square brackets [MM:SS]
-            timestamp = ""
-            if "[" in line and "]" in line:
-                timestamp_start = line.find("[")
-                timestamp_end = line.find("]") + 1
-                timestamp = line[timestamp_start:timestamp_end]
-                finding = line[:timestamp_start].strip() + " " + line[timestamp_end:].strip()
-                finding = finding.strip()
-            else:
-                finding = line
-            
-            if finding:
-                analysis["key_findings"].append({
-                    "timestamp": timestamp,
-                    "finding": finding
-                })
-    
-    # Process transcript excerpts
-    if "transcript" in sections:
-        for line in sections["transcript"]:
-            # Look for timestamps in square brackets [MM:SS]
-            timestamp = ""
-            if "[" in line and "]" in line:
-                timestamp_start = line.find("[")
-                timestamp_end = line.find("]") + 1
-                timestamp = line[timestamp_start:timestamp_end]
-                excerpt = line[:timestamp_start].strip() + " " + line[timestamp_end:].strip()
-                excerpt = excerpt.strip()
-            else:
-                excerpt = line
-            
-            if excerpt:
-                analysis["transcript_excerpts"].append({
-                    "timestamp": timestamp,
-                    "excerpt": excerpt
-                })
-    
-    return analysis
-
-#########################
-# Direct YouTube Analysis Function
-#########################
-
-async def analyze_youtube_url(youtube_url, query=""):
-    """Analyze a single YouTube URL using Gemini."""
-    try:
-        # Initialize the Gemini client
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        model = "gemini-2.0-flash"
-        
-        prompt = """Analyze this YouTube video and provide:
-        1. Title
-        2. Summary of the content
-        3. Key findings with timestamps [MM:SS]
-        4. Transcript excerpts with timestamps [MM:SS] of the most relevant sections
-        
-        Format the output like an interview transcript with clear timestamps for each section."""
-        
-        if query:
-            prompt += f"\n\nFocus your analysis on topics related to: {query}"
-        
-        # Set up the content with the YouTube URL and query
-        contents = [
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_uri(
-                        file_uri=youtube_url,
-                        mime_type="video/*",
-                    ),
-                    types.Part.from_text(text=prompt),
-                ],
-            ),
-        ]
-        
-        generate_content_config = types.GenerateContentConfig(
-            temperature=1,
-            top_p=0.95,
-            top_k=40,
-            max_output_tokens=8192,
-            response_mime_type="text/plain",
-        )
-        
-        # Execute the analysis
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=generate_content_config,
-        )
-        
-        return response.text
-    except Exception as e:
-        logger.error(f"Error analyzing YouTube URL: {str(e)}")
-        return f"Error analyzing YouTube URL: {str(e)}"
 
 #########################
 # Narrative Synthesis Function
@@ -1074,7 +791,8 @@ async def create_narrative_synthesis(research_findings, style_template):
             "error": f"Error creating narrative synthesis: {str(e)}",
             "narrative_report": "An error occurred during narrative synthesis. Please try again."
         }
-    
+
+
 #########################
 # Streamlit UI Functions
 #########################
@@ -1110,11 +828,13 @@ def initialize_session_state():
         st.session_state["youtube_analysis_query"] = ""
     if "youtube_search_query" not in st.session_state:
         st.session_state["youtube_search_query"] = ""
-    # Add speech script to session state
+    # Speech script and audio
     if "speech_script" not in st.session_state:
         st.session_state["speech_script"] = None
     if "trigger_speech_generation" not in st.session_state:
         st.session_state["trigger_speech_generation"] = False
+    if "speech_audio" not in st.session_state:
+        st.session_state["speech_audio"] = None
 
 def display_chat_messages():
     """Display chat message history."""
@@ -1169,12 +889,24 @@ def setup_sidebar():
             if youtube_url:
                 st.session_state["youtube_url"] = youtube_url
                 st.session_state["trigger_youtube_analysis"] = True
-                st.session_state["youtube_analysis_query"] = youtube_query  # Use different key than widget
+                st.session_state["youtube_analysis_query"] = youtube_query
     
     # Add speech generation section
     st.subheader("Speech Generation")
+    
     if st.button("Generate Speech Script"):
         st.session_state["trigger_speech_generation"] = True
+    
+    # # Add ElevenLabs API section
+    # st.subheader("ElevenLabs Integration")
+    # elevenlabs_api_key = st.text_input("ElevenLabs API Key:", type="password", 
+    #                                   help="Get your API key from app.elevenlabs.io")
+    
+    # if elevenlabs_api_key and st.button("Save API Key"):
+    #     # In a real app, you would save this to secrets
+    #     # Here we just update our session
+    #     os.environ["ELEVEN_LABS_API_KEY"] = elevenlabs_api_key
+    #     st.success("API key saved for this session!")
     
     return sources
 
@@ -1269,7 +1001,7 @@ def display_youtube_analysis(analysis):
 def display_youtube_search_results(results):
     """Display YouTube search results."""
     if not results.get("success", False):
-        st.error(results.get("error", "An error occurred during YouTube search."))
+        # st.error(results.get("error", "An error occurred during YouTube search."))
         return
     
     videos = results.get("videos", [])
@@ -1307,6 +1039,8 @@ def display_research_results(results):
         st.error(results)
         return
     
+    st.divider()
+    
     # User Intent Analysis
     st.header("Research Analysis")
     st.subheader("📋 User Intent")
@@ -1320,7 +1054,9 @@ def display_research_results(results):
     # Research Steps & Findings
     st.header("🔍 Research Process & Findings")
     for step in results.research_steps:
-        with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
+        # with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
+        with st.container(border=True):
+            st.write(f"**Step {step.step_number}: {step.step_name}**")
             st.write("**Description:**")
             st.write(step.description)
             
@@ -1392,12 +1128,21 @@ async def main():
     
     # Setup sidebar
     with st.sidebar:
-        available_sources = setup_sidebar()
-        
         # Chat interface for input
-        st.subheader("Chat Interface")
+        st.subheader("📝FinFlow - Chat Interface")
         display_chat_messages()
-        prompt = handle_user_input()
+        
+        
+        handle_user_input()
+
+        # Display the research results
+        if st.session_state.get("research_results"):
+            with st.expander("Research Results", expanded=False):
+                display_research_results(st.session_state["research_results"])
+
+        st.divider() 
+        setup_sidebar()
+        
     
     # Main content area - title and description
     st.title("Research Assistant")
@@ -1422,7 +1167,7 @@ async def main():
         
         with st.spinner("Analyzing YouTube video..."):
             youtube_url = st.session_state["youtube_url"]
-            youtube_query = st.session_state.get("youtube_analysis_query", "")  # Use correct key
+            youtube_query = st.session_state.get("youtube_analysis_query", "")
             
             analysis = await analyze_youtube_url(youtube_url, youtube_query)
             st.session_state["youtube_analyses"].append(analysis)
@@ -1500,13 +1245,8 @@ async def main():
     if st.session_state.get("speech_script"):
         st.markdown("---")
         display_speech_script(st.session_state["speech_script"])
-
-    
-    # Display the research results
-    if st.session_state.get("research_results"):
-        display_research_results(st.session_state["research_results"])
-    
-    # Narrative Synthesis Section  
+        
+        # Narrative Synthesis Section  
     if st.session_state.get("narrative_synthesis"):
         st.markdown("---")
         display_narrative_synthesis(st.session_state["narrative_synthesis"])
