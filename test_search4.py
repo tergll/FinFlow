@@ -394,63 +394,6 @@ When including YouTube analysis results, present them in a narrative style with 
 """
 )
 
-
-#########################
-# Direct YouTube Analysis Function
-#########################
-
-async def analyze_youtube_url(youtube_url, query=""):
-    """Analyze a single YouTube URL using Gemini."""
-    try:
-        # Initialize the Gemini client
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        model = "gemini-2.0-flash"
-        
-        prompt = """Analyze this YouTube video and provide:
-        1. Title
-        2. Summary of the content
-        3. Key findings with timestamps [MM:SS]
-        4. Transcript excerpts with timestamps [MM:SS] of the most relevant sections
-        
-        Format the output like an interview transcript with clear timestamps for each section."""
-        
-        if query:
-            prompt += f"\n\nFocus your analysis on topics related to: {query}"
-        
-        # Set up the content with the YouTube URL and query
-        contents = [
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_uri(
-                        file_uri=youtube_url,
-                        mime_type="video/*",
-                    ),
-                    types.Part.from_text(text=prompt),
-                ],
-            ),
-        ]
-        
-        generate_content_config = types.GenerateContentConfig(
-            temperature=1,
-            top_p=0.95,
-            top_k=40,
-            max_output_tokens=8192,
-            response_mime_type="text/plain",
-        )
-        
-        # Execute the analysis
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=generate_content_config,
-        )
-        
-        return response.text
-    except Exception as e:
-        logger.error(f"Error analyzing YouTube URL: {str(e)}")
-        return f"Error analyzing YouTube URL: {str(e)}"
-
 #########################
 # Narrative Synthesis Agent
 #########################
@@ -645,9 +588,7 @@ def display_speech_script(script):
         # Body sections
         st.subheader("Main Content")
         for i, section in enumerate(script.body_sections, 1):
-            # with st.expander(f"Section {i}", expanded=i==1):
-            with st.container(border=True):
-                st.write(f"**Section {i}:**")
+            with st.expander(f"Section {i}", expanded=i==1):
                 st.markdown(section)
         
         # Conclusion
@@ -669,10 +610,11 @@ def display_speech_script(script):
         selected_voice = st.selectbox("Select Voice:", options=list(voice_options.keys()))
         
         # Show API key status
-        api_status = check_elevenlabs_api_key()
-        st.write("API Key Status:", "Available ✅" if api_status else "Not Available ❌")
-        if not api_status:
-            st.warning("Please add your ElevenLabs API key to secrets to use voice generation.")
+        with st.expander("ElevenLabs API Status"):
+            api_status = check_elevenlabs_api_key()
+            st.write("API Key Status:", "Available ✅" if api_status else "Not Available ❌")
+            if not api_status:
+                st.warning("Please add your ElevenLabs API key to secrets to use voice generation.")
         
         # Section selection
         section_options = ["Full Speech", "Introduction Only", "Conclusion Only"]
@@ -742,56 +684,6 @@ def display_speech_script(script):
         file_name="speech_script.md",
         mime="text/markdown",
     )
-
-#########################
-# Narrative Synthesis Function
-#########################
-
-async def create_narrative_synthesis(research_findings, style_template):
-    """Create a narrative synthesis of research findings using the provided template style."""
-    try:
-        # Extract key points - keep everything as simple strings
-        key_points = []
-        
-        # Handle different types of input
-        if hasattr(research_findings, "research_steps"):
-            for step in research_findings.research_steps:
-                key_points.append(step.findings)
-        
-        if hasattr(research_findings, "key_topics"):
-            for topic in research_findings.key_topics:
-                key_points.append(topic)
-        
-        # Create simplified input
-        synthesis_input = NarrativeInputSimple(
-            query=getattr(research_findings, "user_query", "Unknown query"),
-            summary=getattr(research_findings, "summary", "No summary available"),
-            key_points=key_points,
-            style_template=style_template
-        )
-        
-        # Run the narrative synthesis agent
-        result = await narrative_synthesis_agent.run(
-            user_prompt="Create a narrative synthesis of these research findings in the style of the provided template.",
-            deps=synthesis_input
-        )
-        
-        # Get the result data
-        if result and hasattr(result, 'data'):
-            return result.data
-        else:
-            return {
-                "error": "Failed to generate narrative synthesis",
-                "narrative_report": "An error occurred during narrative synthesis."
-            }
-            
-    except Exception as e:
-        logger.error(f"Error creating narrative synthesis: {str(e)}")
-        return {
-            "error": f"Error creating narrative synthesis: {str(e)}",
-            "narrative_report": "An error occurred during narrative synthesis. Please try again."
-        }
-
 
 #########################
 # Streamlit UI Functions
@@ -897,16 +789,16 @@ def setup_sidebar():
     if st.button("Generate Speech Script"):
         st.session_state["trigger_speech_generation"] = True
     
-    # # Add ElevenLabs API section
-    # st.subheader("ElevenLabs Integration")
-    # elevenlabs_api_key = st.text_input("ElevenLabs API Key:", type="password", 
-    #                                   help="Get your API key from app.elevenlabs.io")
+    # Add ElevenLabs API section
+    st.subheader("ElevenLabs Integration")
+    elevenlabs_api_key = st.text_input("ElevenLabs API Key:", type="password", 
+                                      help="Get your API key from app.elevenlabs.io")
     
-    # if elevenlabs_api_key and st.button("Save API Key"):
-    #     # In a real app, you would save this to secrets
-    #     # Here we just update our session
-    #     os.environ["ELEVEN_LABS_API_KEY"] = elevenlabs_api_key
-    #     st.success("API key saved for this session!")
+    if elevenlabs_api_key and st.button("Save API Key"):
+        # In a real app, you would save this to secrets
+        # Here we just update our session
+        os.environ["ELEVEN_LABS_API_KEY"] = elevenlabs_api_key
+        st.success("API key saved for this session!")
     
     return sources
 
@@ -1039,8 +931,6 @@ def display_research_results(results):
         st.error(results)
         return
     
-    st.divider()
-    
     # User Intent Analysis
     st.header("Research Analysis")
     st.subheader("📋 User Intent")
@@ -1054,9 +944,7 @@ def display_research_results(results):
     # Research Steps & Findings
     st.header("🔍 Research Process & Findings")
     for step in results.research_steps:
-        # with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
-        with st.container(border=True):
-            st.write(f"**Step {step.step_number}: {step.step_name}**")
+        with st.expander(f"Step {step.step_number}: {step.step_name}", expanded=True):
             st.write("**Description:**")
             st.write(step.description)
             
@@ -1121,6 +1009,114 @@ def display_narrative_synthesis(synthesis):
         else:
             st.write("No key points available in the synthesis output.")
 
+
+#########################
+# Narrative Synthesis Function
+#########################
+
+async def create_narrative_synthesis(research_findings, style_template):
+    """Create a narrative synthesis of research findings using the provided template style."""
+    try:
+        # Extract key points - keep everything as simple strings
+        key_points = []
+        
+        # Handle different types of input
+        if hasattr(research_findings, "research_steps"):
+            for step in research_findings.research_steps:
+                key_points.append(step.findings)
+        
+        if hasattr(research_findings, "key_topics"):
+            for topic in research_findings.key_topics:
+                key_points.append(topic)
+        
+        # Create simplified input
+        synthesis_input = NarrativeInputSimple(
+            query=getattr(research_findings, "user_query", "Unknown query"),
+            summary=getattr(research_findings, "summary", "No summary available"),
+            key_points=key_points,
+            style_template=style_template
+        )
+        
+        # Run the narrative synthesis agent
+        result = await narrative_synthesis_agent.run(
+            user_prompt="Create a narrative synthesis of these research findings in the style of the provided template.",
+            deps=synthesis_input
+        )
+        
+        # Get the result data
+        if result and hasattr(result, 'data'):
+            return result.data
+        else:
+            return {
+                "error": "Failed to generate narrative synthesis",
+                "narrative_report": "An error occurred during narrative synthesis."
+            }
+            
+    except Exception as e:
+        logger.error(f"Error creating narrative synthesis: {str(e)}")
+        return {
+            "error": f"Error creating narrative synthesis: {str(e)}",
+            "narrative_report": "An error occurred during narrative synthesis. Please try again."
+        }
+
+
+
+#########################
+# Direct YouTube Analysis Function
+#########################
+
+async def analyze_youtube_url(youtube_url, query=""):
+    """Analyze a single YouTube URL using Gemini."""
+    try:
+        # Initialize the Gemini client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        model = "gemini-2.0-flash"
+        
+        prompt = """Analyze this YouTube video and provide:
+        1. Title
+        2. Summary of the content
+        3. Key findings with timestamps [MM:SS]
+        4. Transcript excerpts with timestamps [MM:SS] of the most relevant sections
+        
+        Format the output like an interview transcript with clear timestamps for each section."""
+        
+        if query:
+            prompt += f"\n\nFocus your analysis on topics related to: {query}"
+        
+        # Set up the content with the YouTube URL and query
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_uri(
+                        file_uri=youtube_url,
+                        mime_type="video/*",
+                    ),
+                    types.Part.from_text(text=prompt),
+                ],
+            ),
+        ]
+        
+        generate_content_config = types.GenerateContentConfig(
+            temperature=1,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+            response_mime_type="text/plain",
+        )
+        
+        # Execute the analysis
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=generate_content_config,
+        )
+        
+        return response.text
+    except Exception as e:
+        logger.error(f"Error analyzing YouTube URL: {str(e)}")
+        return f"Error analyzing YouTube URL: {str(e)}"
+    
 async def main():
     """Main function for the Streamlit app."""
     # Initialize session state
@@ -1128,21 +1124,12 @@ async def main():
     
     # Setup sidebar
     with st.sidebar:
+        available_sources = setup_sidebar()
+        
         # Chat interface for input
-        st.subheader("📝FinFlow - Chat Interface")
+        st.subheader("Chat Interface")
         display_chat_messages()
-        
-        
-        handle_user_input()
-
-        # Display the research results
-        if st.session_state.get("research_results"):
-            with st.expander("Research Results", expanded=False):
-                display_research_results(st.session_state["research_results"])
-
-        st.divider() 
-        setup_sidebar()
-        
+        prompt = handle_user_input()
     
     # Main content area - title and description
     st.title("Research Assistant")
@@ -1167,7 +1154,7 @@ async def main():
         
         with st.spinner("Analyzing YouTube video..."):
             youtube_url = st.session_state["youtube_url"]
-            youtube_query = st.session_state.get("youtube_analysis_query", "")
+            youtube_query = st.session_state.get("youtube_analysis_query", "")  # Use correct key
             
             analysis = await analyze_youtube_url(youtube_url, youtube_query)
             st.session_state["youtube_analyses"].append(analysis)
@@ -1245,8 +1232,13 @@ async def main():
     if st.session_state.get("speech_script"):
         st.markdown("---")
         display_speech_script(st.session_state["speech_script"])
-        
-        # Narrative Synthesis Section  
+
+    
+    # Display the research results
+    if st.session_state.get("research_results"):
+        display_research_results(st.session_state["research_results"])
+    
+    # Narrative Synthesis Section  
     if st.session_state.get("narrative_synthesis"):
         st.markdown("---")
         display_narrative_synthesis(st.session_state["narrative_synthesis"])

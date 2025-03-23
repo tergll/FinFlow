@@ -1062,7 +1062,7 @@ def display_youtube_analysis(analysis):
 def display_youtube_search_results(results):
     """Display YouTube search results."""
     if not results.get("success", False):
-        st.error(results.get("error", "An error occurred during YouTube search."))
+        # st.error(results.get("error", "An error occurred during YouTube search."))
         return
     
     videos = results.get("videos", [])

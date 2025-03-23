@@ -62,6 +62,9 @@ cp .env.example .env
 streamlit run app.py
 ```
 
+<img src="FinFlow_Demo.gif" alt="FinFlow Demo" width="100%">
+
+
 ## Usage Guide
 
 1. **Start Research**: Enter a financial topic, company name, or research question in the chat interface
